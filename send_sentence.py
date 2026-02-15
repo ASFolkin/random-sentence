@@ -2,44 +2,116 @@ import requests
 import os
 import random
 import re
-from datetime import date
+import json
+import sys
+from datetime import datetime, timedelta
 
-# --- Настройки ---
-BOOK_FILE = "book.txt"          # имя файла с книгой
-WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")  # берём из секрета
+# --- Константы ---
+BOOK_FILE = "book.txt"
+STATE_FILE = "week_state.json"
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+WEEKLY_TOTAL = 14          # сколько сообщений за неделю
+MIN_SENTENCE_LENGTH = 20   # минимальная длина предложения
 
-# --- Функция разбиения текста на предложения ---
-def split_sentences(text):
-    # Простое разбиение по ". " (точка + пробел)
-    # Можно усложнить, если нужно учитывать сокращения
-    sentences = [s.strip() for s in text.split('. ') if s.strip()]
+# --- Функция извлечения предложений из текста ---
+def extract_sentences(text):
+    """
+    Разбивает текст на предложения, учитывая:
+    - окончания .?! (но не многоточие)
+    - не разбивает на сокращениях типа т.д., т.п.
+    - предложения могут начинаться с —
+    """
+    # Заменяем многоточие на временный маркер, чтобы не разбивать по точкам внутри
+    text = re.sub(r'\.\.\.', '…', text)  # заменяем на один символ многоточия
+
+    # Регулярка для границ предложений
+    # Ищем .?! после которых пробел и следующая буква заглавная или кавычка или тире
+    # Это сложная тема, для простоты используем упрощённый вариант:
+    # Разбиваем по .?! за которыми следует пробел и затем не сокращение
+    # Но проще сначала разбить принудительно, а потом отфильтровать
+    sentences = re.split(r'(?<=[.!?])\s+(?=[А-ЯA-Z"«—])', text)
+
+    # Очищаем от лишних пробелов и пустых строк
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    # Убираем совсем короткие
+    sentences = [s for s in sentences if len(s) > MIN_SENTENCE_LENGTH]
+
+    # Возвращаем символ многоточия обратно (если нужно) — но можно оставить
+    # sentences = [s.replace('…', '...') for s in sentences]
+
     return sentences
 
-# --- Загрузка книги и подготовка списка предложений ---
+# --- Загрузка книги и получение списка предложений ---
 def load_sentences():
-    with open(BOOK_FILE, 'r', encoding='utf-8') as f:
-        text = f.read()
-    return split_sentences(text)
+    if not os.path.exists(BOOK_FILE):
+        print(f"❌ Файл {BOOK_FILE} не найден")
+        return []
+    try:
+        with open(BOOK_FILE, 'r', encoding='utf-8') as f:
+            text = f.read()
+        return extract_sentences(text)
+    except Exception as e:
+        print(f"❌ Ошибка чтения файла: {e}")
+        return []
 
-# --- Получение предложения для сегодняшнего дня ---
-def get_today_sentence(sentences):
-    today_str = date.today().isoformat()  # например, 2025-02-15
-    # Используем дату как seed для детерминированного выбора
-    random.seed(today_str)
-    index = random.randint(0, len(sentences) - 1)
-    return sentences[index]
+# --- Работа с состоянием ---
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return None
+    return None
 
-# --- Отправка сообщения в Discord через вебхук ---
-def send_to_discord(sentence, index, total):
-    # Ваш шаблон
+def save_state(state):
+    with open(STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+def get_week_number():
+    """Возвращает номер недели от начала года (можно использовать для сброса)"""
+    return datetime.now().isocalendar()[1]
+
+def update_state(sentences_count):
+    state = load_state()
+    current_week = get_week_number()
+
+    if state is None or state.get('week') != current_week:
+        # Новая неделя — сбрасываем
+        state = {
+            'week': current_week,
+            'used_indices': [],
+            'count': 0
+        }
+    return state
+
+def choose_sentence(sentences, state):
+    available = [i for i in range(len(sentences)) if i not in state['used_indices']]
+    if not available:
+        # Если все предложения использованы (маловероятно), сбрасываем used_indices
+        state['used_indices'] = []
+        available = list(range(len(sentences)))
+
+    index = random.choice(available)
+    state['used_indices'].append(index)
+    state['count'] += 1
+    return sentences[index], index
+
+# --- Отправка в Discord ---
+def send_to_discord(sentence, count, total_sentences):
+    if not WEBHOOK_URL:
+        print("❌ WEBHOOK_URL не задан!")
+        return False
+
     payload = {
         "content": "Сегодняшнее предложение:",
         "embeds": [
             {
                 "description": f"**{sentence}**",
-                "color": 4210752,  # тёмно-серый
+                "color": 4210752,
                 "footer": {
-                    "text": f"{index+1}/{total}"   # например, 1/1423
+                    "text": f"{count}/{WEEKLY_TOTAL}"   # count — текущий номер недели (1..14)
                 }
             }
         ],
@@ -48,40 +120,45 @@ def send_to_discord(sentence, index, total):
         "attachments": []
     }
 
-    response = requests.post(WEBHOOK_URL, json=payload)
-    if response.status_code == 204:
-        print("Сообщение успешно отправлено!")
-    else:
-        print(f"Ошибка: {response.status_code} - {response.text}")
+    try:
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        if response.status_code == 204:
+            print("✅ Сообщение успешно отправлено!")
+            return True
+        else:
+            print(f"❌ Discord вернул ошибку: {response.status_code}")
+            print("Ответ:", response.text)
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Ошибка при отправке запроса: {e}")
+        return False
 
 # --- Главная функция ---
 def main():
-    if not WEBHOOK_URL:
-        print("Ошибка: не задан DISCORD_WEBHOOK_URL")
-        return
-
+    print("🔍 Запуск скрипта...")
     sentences = load_sentences()
     if not sentences:
-        print("Ошибка: нет предложений в книге")
-        return
+        print("❌ Нет предложений для отправки.")
+        sys.exit(1)
+    print(f"Загружено предложений: {len(sentences)}")
 
-    today_sentence = get_today_sentence(sentences)
-    # Находим индекс этого предложения (для footer)
-    # Для этого можно заново прогнать seed или просто запомнить индекс
-    # Проще: после random.seed(today_str) запомнить индекс
-    # Переделаем get_today_sentence так, чтобы возвращала и индекс
-    # Но для простоты оставим так: индекс не критичен, можно поставить 1/общее
-    total = len(sentences)
-    # Чтобы индекс был правильным, нужно внутри get_today_sentence возвращать и индекс.
-    # Давайте перепишем функцию:
-    def get_today_sentence_with_index(sentences):
-        today_str = date.today().isoformat()
-        random.seed(today_str)
-        index = random.randint(0, len(sentences) - 1)
-        return sentences[index], index
-    sentence, idx = get_today_sentence_with_index(sentences)
+    state = update_state(len(sentences))
+    print(f"Неделя: {state['week']}, уже отправлено: {state['count']}")
 
-    send_to_discord(sentence, idx, total)
+    if state['count'] >= WEEKLY_TOTAL:
+        print("⚠️ За эту неделю уже отправлено 14 сообщений. Пропускаем отправку.")
+        # Можно ничего не отправлять, либо отправить что-то ещё
+        sys.exit(0)
+
+    sentence, idx = choose_sentence(sentences, state)
+    print(f"Выбрано предложение #{idx}: {sentence[:50]}...")
+
+    success = send_to_discord(sentence, state['count'], len(sentences))
+    if success:
+        save_state(state)
+        print("✅ Состояние сохранено.")
+    else:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
