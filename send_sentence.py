@@ -11,7 +11,7 @@ BOOK_FILE = "book.txt"
 STATE_FILE = "week_state.json"
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 WEEKLY_TOTAL = 14          # сколько сообщений за неделю
-MIN_SENTENCE_LENGTH = 20   # минимальная длина предложения
+MIN_SENTENCE_LENGTH = 30   # минимальная длина предложения
 
 # --- Функция извлечения предложений из текста ---
 def extract_sentences(text):
