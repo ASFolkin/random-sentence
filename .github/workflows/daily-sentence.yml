@@ -2,9 +2,8 @@ name: Send daily sentence
 
 on:
   schedule:
-    # UTC время: 5:00 и 17:00 UTC соответствует 8:00 и 20:00 по Москве (UTC+3)
-    - cron: '0 5,17 * * *'
-  workflow_dispatch:  # позволяет запускать вручную для теста
+    - cron: '0 5,17 * * *'   # 8:00 и 20:00 МСК
+  workflow_dispatch:          # ручной запуск
 
 jobs:
   send:
@@ -12,6 +11,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Restore week state from cache
+        id: cache-restore
+        uses: actions/cache@v4
+        with:
+          path: week_state.json
+          key: week-state-${{ github.run_id }}-${{ github.run_attempt }}
+          # Используем общий ключ для всей ветки, чтобы состояние сохранялось между запусками
+          restore-keys: |
+            week-state-
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,3 +34,10 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python send_sentence.py
+
+      - name: Save week state to cache
+        if: always()  # сохраняем даже если скрипт упал (чтобы не потерять прогресс)
+        uses: actions/cache/save@v4
+        with:
+          path: week_state.json
+          key: week-state-${{ github.run_id }}-${{ github.run_attempt }}
