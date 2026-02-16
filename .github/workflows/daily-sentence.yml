@@ -2,7 +2,7 @@ name: Send daily sentence
 
 on:
   schedule:
-    - cron: '0 5,17 * * *'   # 8:00 и 20:00 МСК
+    - cron: '0 4,16 * * *'   # 8:00 и 20:00 МСК
   workflow_dispatch:          # ручной запуск
 
 jobs:
